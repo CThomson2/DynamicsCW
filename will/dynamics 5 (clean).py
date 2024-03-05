@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import scipy.linalg as la
 from scipy.signal import find_peaks, welch
 from utils import *
+from sklearn.preprocessing import normalize
 
 ## ----------------------------------------------
 
@@ -64,33 +65,8 @@ Psi = eigenvectors
 # Modal damping
 zeta = np.diag(Psi.T.dot(C_global).dot(Psi)) / (2 * omegaO)
 
-# Plot natural frequencies
-plt.figure(figsize=(5, 5))
-plt.plot(np.arange(1, n + 1), omegaO / (2 * np.pi), 'o', color='black')
-plt.grid(True)
-plt.xlabel('Mode')
-plt.ylabel('Frequency (Hz)')
-plt.xlim(0.5, n + 0.5)
-plt.xticks(np.arange(1, n + 1))
-plt.title('Natural frequencies')
-plt.show()
-
-# Plot mode shapes
-plt.subplots(n, 1, sharex=True, figsize=(10, 50))
-for i in range(1, n+1):
-    plt.subplot(n, 1, i)
-    x_values = np.concatenate(([0], np.arange(1, n + 1) * l))
-    y_values = np.concatenate(([0], Psi[:, i - 1]))
-    
-    plt.plot(x_values, y_values, '-o', color='black', markeredgecolor='black', markerfacecolor='white')
-    plt.grid(True)
-    if i == n: 
-        plt.xlabel('Length (m)')
-    plt.ylabel('Displacement')
-    plt.xlim(0, 5.1)
-    plt.title(f"Mode {i} - Frequency {omegaO[i - 1] / (2 * np.pi):.2f} Hz - Damping {100 * zeta[i - 1]:.2f}%")
-
-plt.show()
+# Normalise mode shapes
+Psi = normalize(Psi, axis=0, norm='l1')
 
 ## ----------------------------------------------
 
@@ -111,35 +87,28 @@ W_n = np.zeros([3, 3], dtype=object)
 # Calculate FRF
 for i in range(nf):
     A_1 = K_global - M_global * Omega[i]**2 + 1j * C_global * Omega[i]
-    Ho[:, i] = la.solve(A_1, force)
+    Ho[:, i] = la.solve(A_1, force) 
+    
+## ----------------------------------------------
 
-# Find peaks
+## PEAK PICKING & DAMPING CALCULATION - HALF POWER METHOD (5)
+
+## ----------------------------------------------
+
+# Peak picking
 for i in range(3):
     peaks, _ = find_peaks(np.abs(Ho[i, :]))
     W_n[i, 0] = peaks
     W_n[i, 1] = np.take(frequencies, W_n[i, 0])
-    W_n[i, 2] = np.take(np.abs(Ho[i, :]), W_n[i, 0]) 
-
-# Plot FRF
-plt.subplots(n, 1, sharex=True, figsize=(10, 50))
-for i in range(n):
-    plt.subplot(n, 1, i + 1)
-    plt.semilogy(frequencies, np.abs(Ho[i, :]), color='black')
-    plt.plot(W_n[i, 1], W_n[i, 2], 'o', markeredgecolor='black', markerfacecolor='white')
-    plt.grid(True)
-    if i == n - 1:
-        plt.xlabel('Frequency (Hz)')
-    plt.ylabel('FRF magnitude')
-    plt.title(f'FRF DOF {i + 1}')
-    plt.xlim(0, fs/2)
-
-plt.show()
+    W_n[i, 2] = np.take(np.abs(Ho[i, :]), W_n[i, 0])
     
-## ----------------------------------------------
+W_avg = np.zeros(n)
 
-## DAMPING CALCULATION - HALF POWER METHOD (5)
-
-## ----------------------------------------------
+for i in range(n):
+    tot = 0
+    for j in range(n):
+        tot += W_n[j, 1][i]
+    W_avg[i] = tot/n
 
 # Calculate damping
 damping = np.zeros([3, 3])
@@ -161,9 +130,14 @@ for i in range(3):
 
         damping[i, j] = np.abs(W_a1 - W_a2) / (2 * W_n[i, 1][j]) * 100
         
+damping_avg = np.zeros(3)
+
+for i in range(n):
+    damping_avg[i] = np.average(damping[:,i])
+        
 ## ----------------------------------------------
 
-## STATE SPACE FORM - EXPONENTIAL METHOD (6)
+## STATE SPACE FORM USING MATRIX EXPONENTIAL METHOD (6)
 
 ## ----------------------------------------------
 
@@ -180,6 +154,12 @@ t = np.arange(0, 100, T)
 A = la.expm(Ac * T)
 C = Ac[3:, :]
 
+## ----------------------------------------------
+
+## POWER SPECTRAL DENSITIES RESPONSE TO RANDOM EXCITATION (7)
+
+## ----------------------------------------------
+
 Y = np.zeros((C.shape[0], len(t)))
 
 np.random.seed(1)
@@ -194,17 +174,110 @@ for i in range(len(t)):
     
 (freq, SSY)= welch(Y, fs, nperseg=1024)
 
+## ----------------------------------------------
+
+## STOCHASTIC SUBSPACE IDENTIFICATION (8)
+
+## ----------------------------------------------
+
 ## Calculate modal parametrs
 
-fn, zeta, Phi = modalparams(A, C, T)
+fn, zeta_2, Phi = modalparams(A, C, T)
 
 #List fn, zeta
 
 fnl = fn[0].tolist()
-zetal = zeta[0].tolist()
+zetal = zeta_2[0].tolist()
 
 # Create an array for the x-axis
 modes = np.arange(1, len(fnl) + 1)
+
+Phi = Phi[0]
+
+shape = np.zeros([3,3])
+
+for i in range(Phi.shape[1]):
+    
+    z = Phi[:, i]
+    
+    # Compute the phase of the mode shape vector
+    phase = np.column_stack((np.cos(np.angle(z)), np.sin(np.angle(z))))
+    
+    # Choose the mode shape phase that maximizes the displacement
+    idx = np.argmax([np.sum(np.abs(phase[:, 0])), np.sum(np.abs(phase[:, 1]))])
+    shape[:,i] = np.abs(z) * phase[:, idx]
+
+shape[:,0] = -shape[:,0]    
+shape = normalize(shape, axis=0, norm='l1')
+
+## ----------------------------------------------
+
+## PLOTTING
+
+## ----------------------------------------------
+
+# Plot natural frequencies
+plt.figure(figsize=(5, 5))
+plt.plot(np.arange(1, n + 1), omegaO / (2 * np.pi), 'x', label='Basic')
+plt.plot(np.arange(1, n + 1), W_avg, 'o', label='Peak Picking', alpha=0.5)
+plt.plot(np.arange(1, n + 1), fn[0], 'd', label='SSI')
+plt.grid(True)
+plt.xlabel('Mode')
+plt.ylabel('Frequency (Hz)')
+plt.xlim(0.5, n + 0.5)
+plt.xticks(np.arange(1, n + 1))
+plt.title('Natural frequencies')
+plt.legend()
+plt.show()
+
+# Plot damping ratios
+plt.figure(figsize=(5, 5))
+plt.plot(np.arange(1, n + 1), (100 * zeta), 'x', label='Basic')
+plt.plot(np.arange(1, n + 1), damping_avg, 'o', label='Peak Picking', alpha=0.5)
+plt.plot(np.arange(1, n + 1), (100 * zeta_2[0]), 'd', label='SSI')
+plt.grid(True)
+plt.xlabel('Mode')
+plt.ylabel('Damping Ratio (%)')
+plt.xlim(0.5, n + 0.5)
+plt.xticks(np.arange(1, n + 1))
+plt.title('Damping Ratios')
+plt.legend()
+plt.show()
+
+# Plot mode shapes
+plt.subplots(n, 1, sharex=True, figsize=(10, 50))
+for i in range(1, n+1):
+    plt.subplot(n, 1, i)
+    x_values = np.concatenate(([0], np.arange(1, n + 1) * l))
+    y_values = np.concatenate(([0], Psi[:, i - 1]))
+    y_values2 = np.concatenate(([0], shape[:, i - 1]))
+    
+    plt.plot(x_values, y_values, '-o', color='green', markeredgecolor='black', markerfacecolor='white', label='Basic')
+    plt.plot(x_values, y_values2, '-o', color='black', markeredgecolor='black', markerfacecolor='white', label='SSI')
+    plt.grid(True)
+    if i == n: 
+        plt.xlabel('Length (m)')
+    plt.ylabel('Displacement')
+    plt.xlim(0, 5.1)
+    # plt.title(f"Mode {i} - Frequency {omegaO[i - 1] / (2 * np.pi):.2f} Hz - Damping {100 * zeta[i - 1]:.2f}%")
+    plt.title(f"Mode {i}")
+plt.legend()
+plt.show()
+
+# Plot FRF
+plt.subplots(n, 1, sharex=True, figsize=(10, 50))
+for i in range(n):
+    plt.subplot(n, 1, i + 1)
+    plt.semilogy(frequencies, np.abs(Ho[i, :]), color='black')
+    plt.plot(W_n[i, 1], W_n[i, 2], 'o', markeredgecolor='black', markerfacecolor='white')
+    plt.grid(True)
+    if i == n - 1:
+        plt.xlabel('Frequency (Hz)')
+    plt.ylabel('FRF magnitude')
+    plt.title(f'FRF DOF {i + 1}')
+    plt.xlim(0, fs/2)
+
+plt.show()
 
 # Plot the time history
 plt.figure(figsize=(10, 6))
@@ -228,25 +301,3 @@ for fn_val in fn[0]:  # Assuming fn is a 2D numpy array, use fn[0] to access the
     plt.axvline(x=fn_val, color='k', linestyle='--')
 
 plt.show()
-
-# Plot natural frequencies
-fig = plt.figure(figsize=(10, 3), dpi=80)
-
-plt.subplot(121)
-plt.plot(modes, fnl,  'o', color='black')
-plt.xlabel('Mode')
-plt.ylabel('Frequency (Hz)')
-plt.xticks(np.arange(1, len(fnl) + 1))
-plt.title('Natural frequencies')
-plt.grid(True)
-
-# Plot damping ratios
-plt.subplot(122)
-plt.plot(modes, zetal,  'o', color='black')
-plt.xlabel('Mode')
-plt.ylabel('Damping ratio')
-plt.xticks(np.arange(1, len(zetal) + 1))
-plt.title('Damping ratios')
-plt.grid(True)
-
-plt.show
